@@ -1,0 +1,210 @@
+import { z } from "zod";
+import { COOKIE_NAME } from "@shared/const";
+import { getSessionCookieOptions } from "./_core/cookies";
+import { systemRouter } from "./_core/systemRouter";
+import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
+import * as db from "./db";
+import { notifyOwner } from "./_core/notification";
+
+export const appRouter = router({
+  system: systemRouter,
+  auth: router({
+    me: publicProcedure.query(opts => opts.ctx.user),
+    logout: publicProcedure.mutation(({ ctx }) => {
+      const cookieOptions = getSessionCookieOptions(ctx.req);
+      ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
+      return {
+        success: true,
+      } as const;
+    }),
+  }),
+
+  // Services routers
+  services: router({
+    list: publicProcedure.query(async () => {
+      return await db.getAllServices();
+    }),
+    
+    getById: publicProcedure
+      .input(z.object({ id: z.number() }))
+      .query(async ({ input }) => {
+        return await db.getServiceById(input.id);
+      }),
+  }),
+
+  // Service areas routers
+  serviceAreas: router({
+    list: publicProcedure.query(async () => {
+      return await db.getServiceAreas();
+    }),
+    
+    checkServiceArea: publicProcedure
+      .input(z.object({
+        latitude: z.number(),
+        longitude: z.number(),
+      }))
+      .query(async ({ input }) => {
+        const areas = await db.getServiceAreas();
+        
+        // Calculate distance from each service area center
+        const haversineDistance = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+          const R = 6371; // Earth's radius in km
+          const dLat = (lat2 - lat1) * Math.PI / 180;
+          const dLon = (lon2 - lon1) * Math.PI / 180;
+          const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                    Math.sin(dLon/2) * Math.sin(dLon/2);
+          const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+          return R * c;
+        };
+        
+        // Check if customer location is within any service area
+        const inServiceArea = areas.some(area => {
+          const distance = haversineDistance(
+            input.latitude,
+            input.longitude,
+            Number(area.latitude),
+            Number(area.longitude)
+          );
+          return distance <= Number(area.radiusKm);
+        });
+        
+        return {
+          inServiceArea,
+          message: inServiceArea 
+            ? "ที่อยู่ของคุณอยู่ในพื้นที่บริการ ✓"
+            : "ขออภัย ที่อยู่ของคุณอยู่นอกพื้นที่บริการ",
+        };
+      }),
+  }),
+
+  // Bookings routers
+  bookings: router({
+    create: publicProcedure
+      .input(z.object({
+        serviceId: z.number(),
+        customerName: z.string().min(1),
+        customerPhone: z.string().min(9),
+        customerAddress: z.string().min(1),
+        bookingDate: z.date(),
+        latitude: z.number().optional(),
+        longitude: z.number().optional(),
+        notes: z.string().optional(),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        try {
+          // Create booking
+          const result = await db.createBooking({
+            serviceId: input.serviceId,
+            customerName: input.customerName,
+            customerPhone: input.customerPhone,
+            customerAddress: input.customerAddress,
+            bookingDate: input.bookingDate,
+            notes: input.notes,
+            status: "pending",
+            userId: ctx.user?.id,
+          });
+
+          // Get the service details
+          const service = await db.getServiceById(input.serviceId);
+
+          // Create notification for owner
+          try {
+            const bookingId = (result as any).insertId;
+            const ownerUser = await db.getUserByOpenId(process.env.OWNER_OPEN_ID || "");
+            if (ownerUser && bookingId) {
+              await db.createNotification({
+                bookingId: bookingId,
+                userId: ownerUser.id,
+                title: "การจองบริการใหม่",
+                message: `มีการจองบริการ "${service?.name}" จาก ${input.customerName} (${input.customerPhone})`,
+                isRead: 0,
+              });
+            }
+
+            // Send notification to owner
+            await notifyOwner({
+              title: "การจองบริการใหม่ 🎉",
+              content: `ลูกค้า: ${input.customerName}\nเบอร์โทร: ${input.customerPhone}\nบริการ: ${service?.name}\nวันเวลา: ${input.bookingDate.toLocaleString('th-TH')}\nที่อยู่: ${input.customerAddress}`,
+            });
+          } catch (notificationError) {
+            console.error("Error creating notification:", notificationError);
+            // Don't throw - booking was created successfully, notification is secondary
+          }
+
+          return {
+            success: true,
+            bookingId: (result as any).insertId,
+          };
+        } catch (error) {
+          console.error("Error creating booking:", error);
+          throw error;
+        }
+      }),
+
+    list: protectedProcedure.query(async ({ ctx }) => {
+      // Only owner can view all bookings
+      if (ctx.user.role !== "owner") {
+        throw new Error("Only owner can view all bookings");
+      }
+      return await db.getAllBookings();
+    }),
+
+    getById: protectedProcedure
+      .input(z.object({ id: z.number() }))
+      .query(async ({ input, ctx }) => {
+        const booking = await db.getBookingById(input.id);
+        // Allow owner to view any booking, or user to view their own booking
+        if (ctx.user.role !== "owner" && booking?.userId !== ctx.user.id) {
+          throw new Error("Unauthorized to view this booking");
+        }
+        return booking;
+      }),
+
+    getByUserId: protectedProcedure.query(async ({ ctx }) => {
+      return await db.getBookingsByUserId(ctx.user.id);
+    }),
+
+    updateStatus: protectedProcedure
+      .input(z.object({
+        id: z.number(),
+        status: z.enum(["pending", "confirmed", "completed", "cancelled"]),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        // Check if user is owner
+        if (ctx.user.role !== "owner") {
+          throw new Error("Only owner can update booking status");
+        }
+
+        return await db.updateBookingStatus(input.id, input.status);
+      }),
+  }),
+
+  // Notifications routers
+  notifications: router({
+    getByUserId: protectedProcedure.query(async ({ ctx }) => {
+      return await db.getNotificationsByUserId(ctx.user.id);
+    }),
+
+    markAsRead: protectedProcedure
+      .input(z.object({ id: z.number() }))
+      .mutation(async ({ input }) => {
+        return await db.markNotificationAsRead(input.id);
+      }),
+  }),
+
+  // Therapists routers
+  therapists: router({
+    list: publicProcedure.query(async () => {
+      return await db.getAllTherapists();
+    }),
+
+    getById: publicProcedure
+      .input(z.object({ id: z.number() }))
+      .query(async ({ input }) => {
+        return await db.getTherapistById(input.id);
+      }),
+  }),
+});
+
+export type AppRouter = typeof appRouter;
