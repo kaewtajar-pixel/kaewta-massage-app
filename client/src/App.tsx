@@ -11,6 +11,7 @@ import ServiceAreas from "./pages/ServiceAreas";
 import Booking from "./pages/Booking";
 import BookingHistory from "./pages/BookingHistory";
 import OwnerDashboard from "./pages/OwnerDashboard";
+import LineSettings from "./pages/LineSettings";
 
 function Router() {
   return (
@@ -22,6 +23,7 @@ function Router() {
       <Route path={"/booking"} component={Booking} />
       <Route path={"/booking-history"} component={BookingHistory} />
       <Route path={"/owner-dashboard"} component={OwnerDashboard} />
+      <Route path={"/line-settings"} component={LineSettings} />
       <Route path={"/404"} component={NotFound} />
       {/* Final fallback route */}
       <Route component={NotFound} />

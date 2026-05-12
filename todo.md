@@ -44,3 +44,11 @@
 - [x] ทดสอบแดชบอร์ดเจ้าของ
 - [x] ปรับแต่งประสิทธิภาพและ responsive design
 - [x] สร้าง checkpoint สำหรับการเผยแพร่
+
+## LINE OA Integration
+- [x] สร้างหน้าเชื่อมต่อ LINE OA (LineSettings.tsx)
+- [x] สร้าง LINE Integration backend (line-integration.ts)
+- [x] เพิ่ม Webhook endpoint สำหรับ LINE (lineWebhook.ts)
+- [x] เชื่อมต่อ LINE OA กับระบบจองบริการ
+- [x] เพิ่มการส่งแจ้งเตือนผ่าน LINE
+- [x] ทดสอบ LINE Integration (vitest passed 18/18)

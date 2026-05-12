@@ -5,6 +5,11 @@ import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import * as db from "./db";
 import { notifyOwner } from "./_core/notification";
+import {
+  notifyNewBooking,
+  notifyBookingConfirmed,
+  notifyBookingStatusChanged,
+} from "./line-integration";
 
 export const appRouter = router({
   system: systemRouter,
@@ -127,6 +132,24 @@ export const appRouter = router({
               title: "การจองบริการใหม่ 🎉",
               content: `ลูกค้า: ${input.customerName}\nเบอร์โทร: ${input.customerPhone}\nบริการ: ${service?.name}\nวันเวลา: ${input.bookingDate.toLocaleString('th-TH')}\nที่อยู่: ${input.customerAddress}`,
             });
+
+            // Send LINE notification to owner if configured
+            try {
+              const ownerLineUserId = process.env.OWNER_LINE_USER_ID;
+              if (ownerLineUserId) {
+                await notifyNewBooking(ownerLineUserId, {
+                  customerName: input.customerName,
+                  serviceName: service?.name || "บริการนวด",
+                  bookingDate: input.bookingDate.toLocaleDateString('th-TH'),
+                  bookingTime: input.bookingDate.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }),
+                  phone: input.customerPhone,
+                  address: input.customerAddress,
+                });
+              }
+            } catch (lineError) {
+              console.warn("Warning: Failed to send LINE notification to owner:", lineError);
+              // Don't throw - booking was created successfully, LINE notification is secondary
+            }
           } catch (notificationError) {
             console.error("Error creating notification:", notificationError);
             // Don't throw - booking was created successfully, notification is secondary
@@ -176,7 +199,34 @@ export const appRouter = router({
           throw new Error("Only owner can update booking status");
         }
 
-        return await db.updateBookingStatus(input.id, input.status);
+        const result = await db.updateBookingStatus(input.id, input.status);
+
+        // Send LINE notification to customer if status changed
+        try {
+          const booking = await db.getBookingById(input.id);
+          if (booking) {
+            const service = await db.getServiceById(booking.serviceId);
+            const customerLineUserId = process.env.CUSTOMER_LINE_USER_ID;
+
+            if (customerLineUserId && input.status === "confirmed") {
+              await notifyBookingConfirmed(customerLineUserId, {
+                serviceName: service?.name || "บริการนวด",
+                bookingDate: new Date(booking.bookingDate).toLocaleDateString('th-TH'),
+                bookingTime: new Date(booking.bookingDate).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }),
+              });
+            } else if (customerLineUserId && (input.status === "completed" || input.status === "cancelled")) {
+              await notifyBookingStatusChanged(customerLineUserId, {
+                serviceName: service?.name || "บริการนวด",
+                status: input.status,
+              });
+            }
+          }
+        } catch (lineError) {
+          console.warn("Warning: Failed to send LINE notification to customer:", lineError);
+          // Don't throw - booking status was updated successfully
+        }
+
+        return result;
       }),
   }),
 
@@ -203,6 +253,77 @@ export const appRouter = router({
       .input(z.object({ id: z.number() }))
       .query(async ({ input }) => {
         return await db.getTherapistById(input.id);
+      }),
+  }),
+
+  // LINE OA Integration routers
+  line: router({
+    saveSettings: protectedProcedure
+      .input(z.object({
+        channelId: z.string(),
+        channelSecret: z.string(),
+        channelAccessToken: z.string(),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        // Only owner can save LINE settings
+        if (ctx.user.role !== "owner") {
+          throw new Error("Only owner can save LINE settings");
+        }
+
+        // Validate the token by testing connection
+        try {
+          const response = await fetch('https://api.line.biz/v2/bot/profile/me', {
+            headers: {
+              'Authorization': `Bearer ${input.channelAccessToken}`,
+            },
+          });
+
+          if (!response.ok) {
+            throw new Error('Invalid LINE Channel Access Token');
+          }
+
+          return {
+            success: true,
+            message: 'LINE OA settings saved successfully',
+          };
+        } catch (error) {
+          console.error('Error validating LINE token:', error);
+          throw new Error('Failed to validate LINE Channel Access Token');
+        }
+      }),
+
+    testConnection: protectedProcedure
+      .input(z.object({
+        channelAccessToken: z.string(),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        // Only owner can test LINE connection
+        if (ctx.user.role !== "owner") {
+          throw new Error("Only owner can test LINE connection");
+        }
+
+        try {
+          const response = await fetch('https://api.line.biz/v2/bot/profile/me', {
+            headers: {
+              'Authorization': `Bearer ${input.channelAccessToken}`,
+            },
+          });
+
+          if (!response.ok) {
+            throw new Error('Invalid LINE Channel Access Token');
+          }
+
+          const data = await response.json() as any;
+
+          return {
+            success: true,
+            message: 'LINE connection successful',
+            botName: data.displayName,
+          };
+        } catch (error) {
+          console.error('Error testing LINE connection:', error);
+          throw new Error('Failed to connect to LINE');
+        }
       }),
   }),
 });
