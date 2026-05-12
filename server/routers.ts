@@ -37,6 +37,45 @@ export const appRouter = router({
     list: publicProcedure.query(async () => {
       return await db.getServiceAreas();
     }),
+    
+    checkServiceArea: publicProcedure
+      .input(z.object({
+        latitude: z.number(),
+        longitude: z.number(),
+      }))
+      .query(async ({ input }) => {
+        const areas = await db.getServiceAreas();
+        
+        // Calculate distance from each service area center
+        const haversineDistance = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+          const R = 6371; // Earth's radius in km
+          const dLat = (lat2 - lat1) * Math.PI / 180;
+          const dLon = (lon2 - lon1) * Math.PI / 180;
+          const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                    Math.sin(dLon/2) * Math.sin(dLon/2);
+          const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+          return R * c;
+        };
+        
+        // Check if customer location is within any service area
+        const inServiceArea = areas.some(area => {
+          const distance = haversineDistance(
+            input.latitude,
+            input.longitude,
+            Number(area.latitude),
+            Number(area.longitude)
+          );
+          return distance <= Number(area.radiusKm);
+        });
+        
+        return {
+          inServiceArea,
+          message: inServiceArea 
+            ? "ที่อยู่ของคุณอยู่ในพื้นที่บริการ ✓"
+            : "ขออภัย ที่อยู่ของคุณอยู่นอกพื้นที่บริการ",
+        };
+      }),
   }),
 
   // Bookings routers
@@ -48,6 +87,8 @@ export const appRouter = router({
         customerPhone: z.string().min(9),
         customerAddress: z.string().min(1),
         bookingDate: z.date(),
+        latitude: z.number().optional(),
+        longitude: z.number().optional(),
         notes: z.string().optional(),
       }))
       .mutation(async ({ input, ctx }) => {
@@ -101,14 +142,23 @@ export const appRouter = router({
         }
       }),
 
-    list: publicProcedure.query(async () => {
+    list: protectedProcedure.query(async ({ ctx }) => {
+      // Only owner can view all bookings
+      if (ctx.user.role !== "owner") {
+        throw new Error("Only owner can view all bookings");
+      }
       return await db.getAllBookings();
     }),
 
-    getById: publicProcedure
+    getById: protectedProcedure
       .input(z.object({ id: z.number() }))
-      .query(async ({ input }) => {
-        return await db.getBookingById(input.id);
+      .query(async ({ input, ctx }) => {
+        const booking = await db.getBookingById(input.id);
+        // Allow owner to view any booking, or user to view their own booking
+        if (ctx.user.role !== "owner" && booking?.userId !== ctx.user.id) {
+          throw new Error("Unauthorized to view this booking");
+        }
+        return booking;
       }),
 
     getByUserId: protectedProcedure.query(async ({ ctx }) => {
